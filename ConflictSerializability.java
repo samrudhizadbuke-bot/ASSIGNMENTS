@@ -1,0 +1,733 @@
+package AD;
+import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+public class ConflictSerializability {
+
+    static class Operation {
+        char type;
+        int transaction;
+        String item;
+        int position;
+
+        Operation(char type, int transaction, String item, int position) {
+            this.type = type;
+            this.transaction = transaction;
+            this.item = item;
+            this.position = position;
+        }
+
+        public String toString() {
+            if (type == 'C')
+                return "C" + transaction;
+
+            return type + "" + transaction + "(" + item + ")";
+        }
+    }
+
+    static class Conflict {
+        Operation first;
+        Operation second;
+
+        Conflict(Operation first, Operation second) {
+            this.first = first;
+            this.second = second;
+        }
+    }
+
+    static class LockInfo {
+        char mode;
+        Set<Integer> owners;
+
+        LockInfo(char mode, int owner) {
+            this.mode = mode;
+            owners = new HashSet<>();
+            owners.add(owner);
+        }
+    }
+
+    static final Pattern DATA_OPERATION =
+            Pattern.compile("([RW])(\\d+)\\(([A-Za-z0-9_]+)\\)");
+
+    static final Pattern COMMIT_OPERATION =
+            Pattern.compile("C(\\d+)");
+
+    public static void main(String[] args) {
+
+        Scanner sc = new Scanner(System.in);
+
+        System.out.println("Enter transaction schedule:");
+        String schedule = sc.nextLine().trim();
+
+        if (schedule.isEmpty()) {
+            System.out.println("Schedule cannot be empty.");
+            sc.close();
+            return;
+        }
+
+        List<Operation> operations;
+
+        try {
+            operations = parseSchedule(schedule);
+        } catch (IllegalArgumentException e) {
+            System.out.println("Invalid schedule: " + e.getMessage());
+            sc.close();
+            return;
+        }
+
+        Set<Integer> transactions = new TreeSet<>();
+        Set<String> dataItems = new TreeSet<>();
+
+        for (Operation op : operations) {
+            transactions.add(op.transaction);
+
+            if (op.item != null)
+                dataItems.add(op.item);
+        }
+
+        System.out.println("\nInput Schedule:");
+        System.out.println(schedule);
+
+        // Find conflicts
+        System.out.println("\nConflicting Operations:");
+
+        List<Conflict> conflicts = findConflicts(operations);
+
+        if (conflicts.isEmpty()) {
+            System.out.println("No conflicts found.");
+        } else {
+            for (Conflict conflict : conflicts) {
+                System.out.println(
+                        conflict.first + " -> " +
+                        conflict.second +
+                        " : T" +
+                        conflict.first.transaction +
+                        " -> T" +
+                        conflict.second.transaction
+                );
+            }
+        }
+
+        System.out.println("Total Conflicts = " + conflicts.size());
+
+        // Precedence graph
+        System.out.println("\nPrecedence Graph:");
+
+        Map<Integer, Set<Integer>> graph =
+                buildPrecedenceGraph(transactions, conflicts);
+
+        boolean hasEdges = false;
+
+        for (int from : graph.keySet()) {
+            for (int to : graph.get(from)) {
+                System.out.println("T" + from + " -> T" + to);
+                hasEdges = true;
+            }
+        }
+
+        if (!hasEdges)
+            System.out.println("No precedence edges.");
+
+        boolean cycle = hasCycle(graph, transactions);
+
+        System.out.println("\nCycle Detected: " +
+                (cycle ? "Yes" : "No"));
+
+        System.out.println("Conflict Serializable: " +
+                (cycle ? "No" : "Yes"));
+
+        // 2PL
+        System.out.println("\n2PL Simulation:");
+
+        simulate2PL(operations, transactions);
+
+        // Summary
+        System.out.println("\nFinal Summary:");
+
+        System.out.println("Number of Transactions: "+ transactions.size());
+        System.out.println("Transactions: "+ formatTransactions(transactions));
+        System.out.println("Number of Data Items: "+ dataItems.size());
+        System.out.println("Data Items: "+ dataItems);
+        System.out.println("Total Conflicts: "+ conflicts.size());
+        System.out.println("Cycle Detected: "+ (cycle ? "Yes" : "No"));
+        System.out.println("Conflict Serializable: "+ (cycle ? "No" : "Yes"));
+        sc.close();
+    }
+
+    static List<Operation> parseSchedule(String schedule) {
+
+        String[] tokens = schedule.split("\\s+");
+
+        List<Operation> operations = new ArrayList<>();
+
+        int position = 1;
+
+        for (String token : tokens) {
+
+            Matcher dataMatcher =
+                    DATA_OPERATION.matcher(token);
+
+            if (dataMatcher.matches()) {
+
+                char type =
+                        dataMatcher.group(1).charAt(0);
+
+                int transaction =
+                        Integer.parseInt(
+                                dataMatcher.group(2));
+
+                String item =
+                        dataMatcher.group(3);
+
+                operations.add(
+                        new Operation(
+                                type,
+                                transaction,
+                                item,
+                                position
+                        )
+                );
+
+                position++;
+                continue;
+            }
+
+            Matcher commitMatcher =
+                    COMMIT_OPERATION.matcher(token);
+
+            if (commitMatcher.matches()) {
+
+                int transaction =
+                        Integer.parseInt(
+                                commitMatcher.group(1));
+
+                operations.add(
+                        new Operation(
+                                'C',
+                                transaction,
+                                null,
+                                position
+                        )
+                );
+
+                position++;
+                continue;
+            }
+
+            throw new IllegalArgumentException(
+                    "Invalid operation '" + token +
+                    "'. Use R1(A), W1(A), C1 format."
+            );
+        }
+
+        return operations;
+    }
+
+    static List<Conflict> findConflicts(
+            List<Operation> operations) {
+
+        List<Conflict> conflicts = new ArrayList<>();
+
+        for (int i = 0; i < operations.size(); i++) {
+
+            Operation op1 = operations.get(i);
+
+            if (op1.type == 'C')
+                continue;
+
+            for (int j = i + 1; j < operations.size(); j++) {
+
+                Operation op2 = operations.get(j);
+
+                if (op2.type == 'C')
+                    continue;
+
+                boolean differentTransactions =
+                        op1.transaction != op2.transaction;
+
+                boolean sameItem =
+                        op1.item.equals(op2.item);
+
+                boolean atLeastOneWrite =
+                        op1.type == 'W' ||
+                        op2.type == 'W';
+
+                if (differentTransactions &&
+                        sameItem &&
+                        atLeastOneWrite) {
+
+                    conflicts.add(
+                            new Conflict(op1, op2)
+                    );
+                }
+            }
+        }
+
+        return conflicts;
+    }
+
+    static Map<Integer, Set<Integer>>
+    buildPrecedenceGraph(
+            Set<Integer> transactions,
+            List<Conflict> conflicts) {
+
+        Map<Integer, Set<Integer>> graph =
+                new TreeMap<>();
+
+        for (int transaction : transactions) {
+            graph.put(
+                    transaction,
+                    new TreeSet<>()
+            );
+        }
+
+        for (Conflict conflict : conflicts) {
+
+            int from =
+                    conflict.first.transaction;
+
+            int to =
+                    conflict.second.transaction;
+
+            graph.get(from).add(to);
+        }
+
+        return graph;
+    }
+
+    static boolean hasCycle(
+            Map<Integer, Set<Integer>> graph,
+            Set<Integer> transactions) {
+
+        Set<Integer> visited = new HashSet<>();
+        Set<Integer> recursionStack = new HashSet<>();
+
+        for (int transaction : transactions) {
+
+            if (dfs(
+                    transaction,
+                    graph,
+                    visited,
+                    recursionStack)) {
+
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    static boolean dfs(
+            int transaction,
+            Map<Integer, Set<Integer>> graph,
+            Set<Integer> visited,
+            Set<Integer> recursionStack) {
+
+        if (recursionStack.contains(transaction))
+            return true;
+
+        if (visited.contains(transaction))
+            return false;
+
+        visited.add(transaction);
+        recursionStack.add(transaction);
+
+        for (int next : graph.get(transaction)) {
+
+            if (dfs(
+                    next,
+                    graph,
+                    visited,
+                    recursionStack)) {
+
+                return true;
+            }
+        }
+        recursionStack.remove(transaction);
+
+        return false;
+    }
+    static void simulate2PL(
+            List<Operation> operations,
+            Set<Integer> transactions) {
+
+        Map<String, LockInfo> locks = new HashMap<>();
+
+        Map<Integer, Operation> waitingOperations =
+                new TreeMap<>();
+
+        Map<Integer, Set<Integer>> waitForGraph =
+                new TreeMap<>();
+
+        for (int transaction : transactions) {
+
+            waitForGraph.put(
+                    transaction,
+                    new TreeSet<>()
+            );
+        }
+
+        System.out.printf(
+                "%-6s %-14s %-14s %-35s%n",
+                "Step",
+                "Transaction",
+                "Operation",
+                "Lock Status"
+        );
+
+        int step = 1;
+
+        for (Operation op : operations) {
+
+            if (op.type == 'C') {
+
+                if (waitingOperations.containsKey(
+                        op.transaction)) {
+
+                    System.out.printf(
+                            "%-6d %-14s %-14s %-35s%n",
+                            step++,
+                            "T" + op.transaction,
+                            op,
+                            "Blocked"
+                    );
+
+                    continue;
+                }
+
+                releaseAllLocks(
+                        op.transaction,
+                        locks,
+                        waitForGraph
+                );
+
+                System.out.printf(
+                        "%-6d %-14s %-14s %-35s%n",
+                        step++,
+                        "T" + op.transaction,
+                        op,
+                        "Committed - locks released"
+                );
+
+                retryWaitingOperations(
+                        locks,
+                        waitingOperations,
+                        waitForGraph
+                );
+
+                continue;
+            }
+
+            if (waitingOperations.containsKey(
+                    op.transaction)) {
+
+                System.out.printf(
+                        "%-6d %-14s %-14s %-35s%n",
+                        step++,
+                        "T" + op.transaction,
+                        op,
+                        "Blocked"
+                );
+
+                continue;
+            }
+
+            if (op.type == 'R') {
+
+                Set<Integer> blockers =
+                        getBlockersForRead(
+                                op.transaction,
+                                op.item,
+                                locks
+                        );
+
+                if (blockers.isEmpty()) {
+
+                    grantSharedLock(
+                            op.transaction,
+                            op.item,
+                            locks
+                    );
+
+                    System.out.printf(
+                            "%-6d %-14s %-14s %-35s%n",
+                            step++,
+                            "T" + op.transaction,
+                            op,
+                            "S(" + op.item + ") Granted"
+                    );
+
+                } else {
+
+                    addWaitingOperation(
+                            op,
+                            blockers,
+                            waitingOperations,
+                            waitForGraph
+                    );
+
+                    System.out.printf(
+                            "%-6d %-14s %-14s %-35s%n", step++,"T" + op.transaction,op,"S(" + op.item +") Waiting for " +formatTransactionSet(blockers)
+                    );
+                }
+
+            } else if (op.type == 'W') {
+
+                Set<Integer> blockers =
+                        getBlockersForWrite(op.transaction,op.item,locks);
+
+                if (blockers.isEmpty()) {
+
+                    grantExclusiveLock(
+                            op.transaction,
+                            op.item,
+                            locks
+                    );
+
+                    System.out.printf(
+                            "%-6d %-14s %-14s %-35s%n",
+                            step++,
+                            "T" + op.transaction,
+                            op,
+                            "X(" + op.item + ") Granted"
+                    );
+
+                } else {
+
+                    addWaitingOperation(
+                            op,
+                            blockers,
+                            waitingOperations,
+                            waitForGraph
+                    );
+
+                    System.out.printf(
+                            "%-6d %-14s %-14s %-35s%n",
+                            step++,
+                            "T" + op.transaction,
+                            op,
+                            "X(" + op.item +
+                            ") Waiting for " +
+                            formatTransactionSet(blockers)
+                    );
+                }
+            }
+
+            if (hasCycle(
+                    waitForGraph,
+                    transactions)) {
+
+                System.out.println( "\nDeadlock Detected");
+
+                System.out.println("Wait-for Graph:" );
+                printGraph(waitForGraph);
+                break;
+            }
+        }
+        System.out.println();
+        if (hasCycle( waitForGraph, transactions)) {
+            System.out.println( "Waiting Transactions: " +
+                    formatTransactionSet( waitingOperations.keySet()) );
+            System.out.println("Execution Status: Deadlock" );
+
+        } else if (waitingOperations.isEmpty()) {
+            System.out.println( "Waiting Transactions: None");
+            System.out.println("Execution Status: Completed" );
+        } else {
+            System.out.println( "Waiting Transactions: " + formatTransactionSet(waitingOperations.keySet()));
+            System.out.println(
+                    "Execution Status: Blocking");
+        }
+    }
+    static Set<Integer> getBlockersForRead(
+            int transaction,
+            String item,
+            Map<String, LockInfo> locks) {
+
+        Set<Integer> blockers = new TreeSet<>();
+
+        LockInfo lock = locks.get(item);
+
+        if (lock == null)
+            return blockers;
+
+        if (lock.mode == 'S')
+            return blockers;
+
+        for (int owner : lock.owners) {
+
+            if (owner != transaction)
+                blockers.add(owner);
+        }
+
+        return blockers;
+    }
+
+    static Set<Integer> getBlockersForWrite(
+            int transaction,
+            String item,
+            Map<String, LockInfo> locks) {
+
+        Set<Integer> blockers = new TreeSet<>();
+
+        LockInfo lock = locks.get(item);
+
+        if (lock == null)
+            return blockers;
+
+        if (lock.mode == 'X') {
+
+            if (lock.owners.contains(transaction))
+                return blockers;
+
+            blockers.addAll(lock.owners);
+
+            return blockers;
+        }
+
+        for (int owner : lock.owners) {
+
+            if (owner != transaction)
+                blockers.add(owner);
+        }
+
+        return blockers;
+    }
+
+    static void grantSharedLock(
+            int transaction,
+            String item,
+            Map<String, LockInfo> locks) {
+
+        LockInfo lock = locks.get(item);
+
+        if (lock == null) {
+
+            locks.put(
+                    item,
+                    new LockInfo(
+                            'S',
+                            transaction
+                   )
+            );
+        } else {
+
+            lock.owners.add(transaction);
+        }
+    }
+
+    static void grantExclusiveLock(
+            int transaction,
+            String item,
+            Map<String, LockInfo> locks) {
+        LockInfo lock = locks.get(item);
+        if (lock == null) {
+            locks.put(item, new LockInfo('X',transaction));
+            return;
+        }
+        lock.mode = 'X';
+        lock.owners.clear();
+        lock.owners.add(transaction);
+    }
+    static void addWaitingOperation(
+            Operation operation,
+            Set<Integer> blockers,
+            Map<Integer, Operation> waitingOperations,
+            Map<Integer, Set<Integer>> waitForGraph) {
+        waitingOperations.put(
+                operation.transaction,
+                operation
+        );
+        waitForGraph
+                .get(operation.transaction)
+                .addAll(blockers);
+    }
+    static void releaseAllLocks(
+            int transaction,
+            Map<String, LockInfo> locks,
+            Map<Integer, Set<Integer>> waitForGraph) {
+        Iterator<Map.Entry<String, LockInfo>> iterator =
+                locks.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<String, LockInfo> entry =
+                    iterator.next();
+            LockInfo lock = entry.getValue();
+            lock.owners.remove(transaction);
+            if (lock.owners.isEmpty())
+                iterator.remove();
+        }
+        waitForGraph.remove(transaction);
+        for (Set<Integer> blockers :
+                waitForGraph.values()) {
+            blockers.remove(transaction);
+        }
+    }
+
+    static void retryWaitingOperations(
+            Map<String, LockInfo> locks,
+            Map<Integer, Operation> waitingOperations,
+            Map<Integer, Set<Integer>> waitForGraph) {
+
+        boolean progress;
+        do {
+            progress = false;
+            Iterator<Map.Entry<Integer, Operation>> iterator =
+                    waitingOperations.entrySet().iterator();
+            while (iterator.hasNext()) {
+                Map.Entry<Integer, Operation> entry =iterator.next();
+                int transaction = entry.getKey();
+                Operation operation = entry.getValue();
+                Set<Integer> blockers;
+                if (operation.type == 'R') {
+                    blockers = getBlockersForRead(transaction,operation.item,locks);
+                } else {
+                    blockers = getBlockersForWrite(transaction,operation.item,locks);
+                }
+                if (blockers.isEmpty()) {
+                    if (operation.type == 'R') {
+                        grantSharedLock(transaction,operation.item,locks);
+                    } else {
+                        grantExclusiveLock(transaction,operation.item,locks);}
+                    iterator.remove();
+                    waitForGraph.get(transaction).clear();
+                    progress = true;
+                } else {
+                    waitForGraph.get(transaction).clear();
+                    waitForGraph .get(transaction).addAll(blockers);
+                }
+            }
+        } while (progress);
+    }
+    static void printGraph(
+            Map<Integer, Set<Integer>> graph) {
+        boolean printed = false;
+        for (int from : graph.keySet()) {
+            for (int to : graph.get(from)) {
+                System.out.println( "T" + from + " -> T" + to);
+                printed = true;
+            }
+        }
+        if (!printed)
+            System.out.println("No waiting dependencies.");
+    }
+    static String formatTransactions(
+            Set<Integer> transactions) {
+        List<String> names = new ArrayList<>();
+        for (int transaction : transactions) {
+            names.add("T" + transaction);
+        }
+        return names.toString();
+    }
+    static String formatTransactionSet(
+            Collection<Integer> transactions) {
+        List<Integer> sorted =
+                new ArrayList<>(transactions);
+        Collections.sort(sorted);
+        List<String> names = new ArrayList<>();
+        for (int transaction : sorted) {
+            names.add("T" + transaction);
+        }
+        return names.toString();
+    }
+}
